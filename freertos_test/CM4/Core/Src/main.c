@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -60,38 +60,38 @@ UART_HandleTypeDef huart3;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 128 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
-/* Definitions for Task_A */
-osThreadId_t Task_AHandle;
-const osThreadAttr_t Task_A_attributes = {
-  .name = "Task_A",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+/* Definitions for Print */
+osThreadId_t PrintHandle;
+const osThreadAttr_t Print_attributes = {
+  .name = "Print",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
-/* Definitions for Task_B */
-osThreadId_t Task_BHandle;
-const osThreadAttr_t Task_B_attributes = {
-  .name = "Task_B",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+/* Definitions for QueueSerial */
+osMessageQueueId_t QueueSerialHandle;
+const osMessageQueueAttr_t QueueSerial_attributes = {
+  .name = "QueueSerial"
 };
-/* Definitions for uartMutex */
-osMutexId_t uartMutexHandle;
-const osMutexAttr_t uartMutex_attributes = {
-  .name = "uartMutex"
+/* Definitions for printfMutex */
+osMutexId_t printfMutexHandle;
+const osMutexAttr_t printfMutex_attributes = {
+  .name = "printfMutex"
 };
 /* USER CODE BEGIN PV */
+extern UART_HandleTypeDef huart3;
 
+// A buffer to hold the single byte we are receiving
+uint8_t rx_byte;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
 void StartDefaultTask(void *argument);
-void StartTask02(void *argument);
-void StartTask03(void *argument);
+void TaskPrint(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -99,6 +99,11 @@ void StartTask03(void *argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+int __io_putchar(int ch) {
+    HAL_UART_Transmit(&huart3, (uint8_t*)&ch, 1, HAL_MAX_DELAY);
+    return ch;
+}
+
 
 /* USER CODE END 0 */
 
@@ -147,14 +152,14 @@ int main(void)
   MX_GPIO_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_UART_Receive_IT(&huart3, &rx_byte, 1);
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();
   /* Create the mutex(es) */
-  /* creation of uartMutex */
-  uartMutexHandle = osMutexNew(&uartMutex_attributes);
+  /* creation of printfMutex */
+  printfMutexHandle = osMutexNew(&printfMutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -168,6 +173,10 @@ int main(void)
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
+  /* Create the queue(s) */
+  /* creation of QueueSerial */
+  QueueSerialHandle = osMessageQueueNew (16, sizeof(uint8_t), &QueueSerial_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -176,11 +185,8 @@ int main(void)
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
-  /* creation of Task_A */
-  Task_AHandle = osThreadNew(StartTask02, NULL, &Task_A_attributes);
-
-  /* creation of Task_B */
-  Task_BHandle = osThreadNew(StartTask03, NULL, &Task_B_attributes);
+  /* creation of Print */
+  PrintHandle = osThreadNew(TaskPrint, NULL, &Print_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -274,7 +280,20 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  // 1. Check if this interrupt belongs to USART3
+  if (huart->Instance == USART3) {
 
+    // 2. Put the received byte into the FreeRTOS Queue
+    // Priority = 0, Timeout = 0 (Crucial for ISRs!)
+    osMessageQueuePut(QueueSerialHandle, &rx_byte, 0, 0);
+
+    // 3. RE-ARM the interrupt so it listens for the NEXT byte
+    // Without this line, the interrupt fires once and never again.
+    HAL_UART_Receive_IT(&huart3, &rx_byte, 1);
+  }
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -287,68 +306,48 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
+	char *msg = "default...";
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+	osMutexAcquire(printfMutexHandle, osWaitForever);
+
+	printf("%s\r\n", msg);
+
+	osMutexRelease(printfMutexHandle);
+
+    osDelay(1000);
   }
   /* USER CODE END 5 */
 }
 
-/* USER CODE BEGIN Header_StartTask02 */
+/* USER CODE BEGIN Header_TaskPrint */
 /**
-* @brief Function implementing the Task_A thread.
+* @brief Function implementing the Print thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartTask02 */
-void StartTask02(void *argument)
+/* USER CODE END Header_TaskPrint */
+void TaskPrint(void *argument)
 {
-  /* USER CODE BEGIN StartTask02 */
-	char *msg = "M4 Core: Tick...\r\n";
+  /* USER CODE BEGIN TaskPrint */
+	  uint8_t receivedChar;
+	  osStatus_t status;
 
 	  for(;;)
 	  {
-		// 1. Wait to grab the Mutex (Token)
-		// If "myMutex01Handle" is red/undefined, scroll up to top of main.c to check the name
-		if (osMutexAcquire(uartMutexHandle, osWaitForever) == osOK)
-		{
-		   // 2. Transmit Data
-		   HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
+		// Wait forever for a message to arrive
+		status = osMessageQueueGet(QueueSerialHandle, &receivedChar, NULL, osWaitForever);
 
-		   // 3. Release Mutex so Task B can speak
-		   osMutexRelease(uartMutexHandle);
+		if (status == osOK) {
+			osMutexAcquire(printfMutexHandle, osWaitForever);
+
+			printf("Received: %c\r\n", receivedChar);
+
+			osMutexRelease(printfMutexHandle);
 		}
-
-		// 4. Wait 1000ms
-		osDelay(1000);
 	  }
-  /* USER CODE END StartTask02 */
-}
-
-/* USER CODE BEGIN Header_StartTask03 */
-/**
-* @brief Function implementing the Task_B thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTask03 */
-void StartTask03(void *argument)
-{
-	/* USER CODE BEGIN StartTask_B */
-	  char *msg = "M4 Core: Tock!!!!\r\n";
-
-	  for(;;)
-	  {
-	    if (osMutexAcquire(uartMutexHandle, osWaitForever) == osOK)
-	    {
-	       HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
-	       osMutexRelease(uartMutexHandle);
-	    }
-
-	    osDelay(500);
-	  }
-  /* USER CODE END StartTask03 */
+  /* USER CODE END TaskPrint */
 }
 
 /**
